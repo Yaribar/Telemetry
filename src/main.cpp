@@ -25,6 +25,14 @@ const uint8_t channelLeft = 32;
 static volatile int16_t ISRCounterRight = 0;
 static volatile int16_t ISRCounterLeft = 0;
 static portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t pulseCounterRight; 
+static uint8_t pulseCounterLeft; 
+static unsigned long currentRevRight; 
+static unsigned long currentRevLeft; 
+static unsigned long previousRevRight; 
+static unsigned long previousRevLeft; 
+float RPMR=0.0,RPML=0.0;
+
 
 //************************
 //**  GPRS CREDENTIALS  **
@@ -60,6 +68,7 @@ long count = 0;
 
 void setupModem();
 void reconnect();
+void getSpeed(int sampling_time);
 //void callback(char *topic, byte *payload, unsigned int length);
 
 MPU6050 mpu6050(Wire);
@@ -67,15 +76,24 @@ float accX, accY, accZ;
 
 ulong start_time_imu;
 ulong start_time;
-ulong start_time_lap;
+ulong start_time_speed;
 
 //****************************************
 //**************** ADS *******************
 //****************************************
 
-Adafruit_ADS1115 ads;
-int16_t adc0;
-float voltage=0.0;
+Adafruit_ADS1115 ads1;
+//Adafruit_ADS1115 ads2;
+
+int16_t adc1[4];
+int16_t adc2[4];
+
+float voltageFR=0.0;
+float voltageFL=0.0;
+float voltageBR=0.0;
+float voltageBL=0.0;
+
+float current=0.0;
 
 //****************************************
 //**************** ISR *******************
@@ -83,13 +101,13 @@ float voltage=0.0;
 
 void ISRencoderRight(){
   portENTER_CRITICAL_ISR(&spinlock);
-  ISRcounterRight++;
+  ISRCounterRight++;
   portEXIT_CRITICAL_ISR(&spinlock);
 }
 
 void ISRencoderLeft(){
   portENTER_CRITICAL_ISR(&spinlock);
-  ISRcounterLeft++;
+  ISRCounterLeft++;
   portEXIT_CRITICAL_ISR(&spinlock);
 }
 
@@ -102,8 +120,8 @@ void setup()
 
     pinMode(channelRight, INPUT_PULLUP); 
     pinMode(channelLeft, INPUT_PULLUP);  
-    attachInterrupt(digitalPinToInterrupt(channelPinADir), ISRencoderRight, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(channelPinBDir), ISRencoderLeft, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(channelRight), ISRencoderRight, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(channelLeft), ISRencoderLeft, CHANGE);
 
 	setupModem(); 
   	mqtt.setServer(mqtt_server, mqtt_port); // MQTT Broker setup
@@ -113,11 +131,9 @@ void setup()
 	mpu6050.calcGyroOffsets(true);
 	delay(1000);
 
-    ads.setGain(GAIN_TWOTHIRDS); // +/- 6.144V  1 bit = 0.1875mV (default)
-    ads.begin(0x49);
+    ads1.setGain(GAIN_TWOTHIRDS); // +/- 6.144V  1 bit = 0.1875mV (default)
+    ads1.begin(0x48);
     delay(100);
-
-    
 
 }
 
@@ -144,33 +160,34 @@ void loop()
 			start_time_imu = millis();
 		}
 
-        if(ISRCounterRight){
-            pulseCounterRight++; 
-            portENTER_CRITICAL_ISR(&spinlock);
-            ISRCounterRight--;
-            portEXIT_CRITICAL_ISR(&spinlock);
-        }
-
-        if(ISRCounterLeft){
-            pulseCounterLeft++; 
-            portENTER_CRITICAL_ISR(&spinlock);
-            ISRCounterLeft--;
-            portEXIT_CRITICAL_ISR(&spinlock);
-        }
+        getSpeed(100);
 
 		if (millis() - start_time > SAMPLING_PERIOD)
-		{
-            adc0 = ads.readADC_SingleEnded(0);
-            voltage=adc0*3.3/26400.0;
-            adc0 = ads.readADC_SingleEnded(0);
-            v_current=adc0*3.3/26400.0;
+		{   
+
+            adc1[0] = ads1.readADC_SingleEnded(0);
+            voltageFR=adc1[0]*3.3/26400.0;
+            adc1[1] = ads1.readADC_SingleEnded(0);
+            voltageFL=adc1[1]*3.3/26400.0;
+            //adc1[2] = ads1.readADC_SingleEnded(0);
+            //voltageBR=adc1[2]*3.3/26400.0;
+            //adc1[3] = ads1.readADC_SingleEnded(0);
+            //voltageBR=adc1[3]*3.3/26400.0;
+
+            adc1[2] = ads1.readADC_SingleEnded(0);
+            current=(adc1[2]*3.3*100)/26400.0;
             
-			String str1 = String(voltage);
+			String str1 = String(voltageFR);
 			str1.toCharArray(msg, 35);
 			mqtt.publish("dashboard/voltage", msg);
-            Serial.printf("Adc: %d\n",adc0);
-            Serial.printf("Voltage: %f\n",voltage);
+            Serial.printf("Adc: %d\n",adc1[0]);
+            
+            Serial.printf("Voltage: %f\n",voltageFR);
             Serial.printf("Current: %f\n",current);
+            Serial.printf("rmp Right: %f\n",RPMR);
+            Serial.printf("rmp Left: %f\n",RPML);
+            Serial.printf("accY: %f\n",accY);
+
 			start_time = millis();
 		}
 	}
@@ -178,7 +195,49 @@ void loop()
 }
 
 //*****************************
-//******  CONEXION WIFI  ******
+//********  GET SPEED  ********
+//*****************************
+
+void getSpeed(int sampling_time){
+    if(ISRCounterRight){
+        pulseCounterRight++; 
+        portENTER_CRITICAL_ISR(&spinlock);
+        ISRCounterRight--;
+        portEXIT_CRITICAL_ISR(&spinlock);
+    }
+
+    if(ISRCounterLeft){
+        pulseCounterLeft++; 
+        portENTER_CRITICAL_ISR(&spinlock);
+        ISRCounterLeft--;
+        portEXIT_CRITICAL_ISR(&spinlock);
+    }
+
+    if(pulseCounterRight>=PPR){
+        currentRevRight++;
+        pulseCounterRight=0;
+    } 
+
+    if(pulseCounterLeft>=PPR){
+        currentRevLeft++;
+        pulseCounterRight=0;
+    } 
+
+    if (millis() - start_time_speed > sampling_time)
+		{   
+            start_time_speed=millis();
+
+            RPMR = (currentRevRight - previousRevRight)*float(sampling_time);
+            previousRevRight = currentRevRight;
+
+            RPML = (currentRevLeft - previousRevLeft)*float(sampling_time);
+            previousRevLeft = currentRevLeft;
+
+        }
+}
+
+//*****************************
+//****** WIFI CONNECTION ******
 //*****************************
 
 void setupModem(){
