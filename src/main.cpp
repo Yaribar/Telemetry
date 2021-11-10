@@ -1,8 +1,14 @@
+/*
+    Name:       Telemetry
+    Author:     YARIBAR
+*/
+
 #define TINY_GSM_MODEM_SIM800
 #define TINY_GSM_RX_BUFFER 512
 #define RXD2 16 //Hardware Serial
 #define TXD2 17 //Hardware Serial
 #define SAMPLING_PERIOD 100
+#define PPR 1
 
 #include <Arduino.h>
 #include <TinyGsmClient.h>
@@ -13,6 +19,12 @@
 #include "MPU6050_tockn.h"
 #include <Adafruit_ADS1X15.h>
 #include <SPI.h>
+
+const uint8_t channelRight = 33;
+const uint8_t channelLeft = 32;
+static volatile int16_t ISRCounterRight = 0;
+static volatile int16_t ISRCounterLeft = 0;
+static portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 //************************
 //**  GPRS CREDENTIALS  **
@@ -62,15 +74,36 @@ ulong start_time_lap;
 //****************************************
 
 Adafruit_ADS1115 ads;
-//const float multiplier = 0.1875F;
 int16_t adc0;
 float voltage=0.0;
+
+//****************************************
+//**************** ISR *******************
+//****************************************
+
+void ISRencoderRight(){
+  portENTER_CRITICAL_ISR(&spinlock);
+  ISRcounterRight++;
+  portEXIT_CRITICAL_ISR(&spinlock);
+}
+
+void ISRencoderLeft(){
+  portENTER_CRITICAL_ISR(&spinlock);
+  ISRcounterLeft++;
+  portEXIT_CRITICAL_ISR(&spinlock);
+}
+
 
 void setup()
 {
 	
 	Serial.begin(115200);
   	Serial2.begin(115200, SERIAL_8N1, RXD2,TXD2); //Baud rate
+
+    pinMode(channelRight, INPUT_PULLUP); 
+    pinMode(channelLeft, INPUT_PULLUP);  
+    attachInterrupt(digitalPinToInterrupt(channelPinADir), ISRencoderRight, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(channelPinBDir), ISRencoderLeft, CHANGE);
 
 	setupModem(); 
   	mqtt.setServer(mqtt_server, mqtt_port); // MQTT Broker setup
@@ -80,15 +113,17 @@ void setup()
 	mpu6050.calcGyroOffsets(true);
 	delay(1000);
 
-    ads.setGain(GAIN_TWO);  //    +/- 4.096V  1 bit = 0.125mV
+    ads.setGain(GAIN_TWOTHIRDS); // +/- 6.144V  1 bit = 0.1875mV (default)
     ads.begin(0x49);
     delay(100);
 
+    
+
 }
 
-//******************************************************************************************************************
-//*********** MAIN *************************************************************************************************
-//******************************************************************************************************************
+//**************************************
+//************** MAIN ******************
+//**************************************
 
 void loop()
 {
@@ -109,16 +144,33 @@ void loop()
 			start_time_imu = millis();
 		}
 
+        if(ISRCounterRight){
+            pulseCounterRight++; 
+            portENTER_CRITICAL_ISR(&spinlock);
+            ISRCounterRight--;
+            portEXIT_CRITICAL_ISR(&spinlock);
+        }
+
+        if(ISRCounterLeft){
+            pulseCounterLeft++; 
+            portENTER_CRITICAL_ISR(&spinlock);
+            ISRCounterLeft--;
+            portEXIT_CRITICAL_ISR(&spinlock);
+        }
+
 		if (millis() - start_time > SAMPLING_PERIOD)
 		{
             adc0 = ads.readADC_SingleEnded(0);
-            voltage=adc0*3.3/52800.0;
+            voltage=adc0*3.3/26400.0;
+            adc0 = ads.readADC_SingleEnded(0);
+            v_current=adc0*3.3/26400.0;
             
 			String str1 = String(voltage);
 			str1.toCharArray(msg, 35);
 			mqtt.publish("dashboard/voltage", msg);
             Serial.printf("Adc: %d\n",adc0);
             Serial.printf("Voltage: %f\n",voltage);
+            Serial.printf("Current: %f\n",current);
 			start_time = millis();
 		}
 	}
